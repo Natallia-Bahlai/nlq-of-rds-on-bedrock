@@ -1,4 +1,4 @@
-CREATE TABLE public.netflix_shows (
+CREATE TABLE public.shows (
     show_id text NOT NULL,
     type text,
     title text,
