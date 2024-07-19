@@ -403,3 +403,7 @@ Outputs:
   RDSDBInstanceEndpointAddress:
     Description: The RDS endpoint address.
     Value: !GetAtt RDSDBInstance.Endpoint.Address
+    
+  S3BucketLocation:
+    Description: The S3Bucket location.
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/s3/upload/${S3Bucket}"
