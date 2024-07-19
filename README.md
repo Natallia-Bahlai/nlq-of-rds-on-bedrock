@@ -22,12 +22,12 @@ SELECT extversion FROM pg_extension WHERE extname='vector';
 ```sh
 psql -d "postgres://username:pasword@clusterendpoint/netflix" -f netflix.sql
 ```
-4. Upload file to S3 bucket
+4. Upload file `netflix_ddl` to S3 bucket which can be found in the NlqMainStack CloudFormation output
 
 ### Step 3: Deploy the Bedrock NLQ Stack: Agent and Knowledge Base
 ```sh
 aws cloudformation create-stack \
-  --stack-name NlqMainStack \
+  --stack-name NlqBedrockStack \
   --template-body file://NlqBedrockStack.yaml \
   --capabilities CAPABILITY_NAMED_IAM
 ```
