@@ -1,0 +1,239 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: "Guidance for Natural Language Queries of various datasources on AWS - Bedrock KB stack template"
+Parameters:    
+  LLM:
+    Type: String
+    Default: "anthropic.claude-3-sonnet-20240229-v1:0"
+    Description: FoundationModel
+        
+Resources:
+
+  IAMRoleForKnowledgeBase:
+    Type: "AWS::IAM::Role"
+    UpdateReplacePolicy: "Retain"
+    DeletionPolicy: "Delete"
+    Properties:
+      Path: "/service-role/"
+      MaxSessionDuration: 3600
+      RoleName: "nlq-role-for-knowledge-base" #execution role
+      Policies:
+      - PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Resource: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v1"
+            Action:
+            - "bedrock:InvokeModel"
+            Effect: "Allow"
+          - Resource: "{{resolve:ssm:/nlq/s3/arn}}"
+            Action:
+            - "s3:ListBucket"
+            Effect: "Allow"
+          - Resource: !Sub "{{resolve:ssm:/nlq/s3/arn}}/*"
+            Action:
+            - "s3:GetObject"
+            Effect: "Allow"
+          - Resource: "{{resolve:ssm:/nlq/rdscluster/arn}}"
+            Action:
+            - "rds:DescribeDBClusters"
+            - "rds-data:BatchExecuteStatement"
+            - "rds-data:ExecuteStatement"
+            Effect: "Allow"
+          - Resource: "{{resolve:ssm:/nlq/rdscluster/secret/arn}}"
+            Action:
+            - "secretsmanager:GetSecretValue"
+            Effect: "Allow"
+        PolicyName: "nlq-policy-kb"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action: "sts:AssumeRole"
+          Effect: "Allow"
+          Principal:
+            Service: "bedrock.amazonaws.com"
+
+  KnowledgeBaseWithRDS:
+    Type: AWS::Bedrock::KnowledgeBase
+    UpdateReplacePolicy: "Retain"
+    DeletionPolicy: "Delete"
+    Properties:
+      Name: "nlq-knowledge-base"
+      Description: "Knowledge Base with RDS schema and table metadata"
+      RoleArn: !GetAtt IAMRoleForKnowledgeBase.Arn
+      KnowledgeBaseConfiguration:
+        Type: "VECTOR"
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v1"
+      StorageConfiguration:
+        Type: "RDS"
+        RdsConfiguration:
+          ResourceArn: "{{resolve:ssm:/nlq/rdscluster/arn}}"
+          CredentialsSecretArn: "{{resolve:ssm:/nlq/rdscluster/secret/arn}}"
+          DatabaseName: "netflix" #!Ref NLQAppDatabaseName
+          TableName: "bedrock_integration.bedrock_kb"
+          FieldMapping:
+            VectorField: "embedding"
+            TextField: "chunks"
+            MetadataField: "metadata"
+            PrimaryKeyField: "id"  
+
+  SampleDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref KnowledgeBaseWithRDS
+      Name: "nlq-kb-s3"
+      Description: "Ok"
+      DataSourceConfiguration:
+        Type: "S3"
+        S3Configuration:
+          BucketArn: "{{resolve:ssm:/nlq/s3/arn}}"
+          #InclusionPrefixes: ["knowledge-base"]
+            
+  IAMRoleForAgent:
+    Type: "AWS::IAM::Role"
+    UpdateReplacePolicy: "Retain"
+    DeletionPolicy: "Delete"
+    Properties:
+      Path: "/service-role/"
+      MaxSessionDuration: 3600
+      RoleName: "nlq-role-for-agent" #execution role
+      Policies:
+      - PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Resource: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${LLM}"
+            Action:
+            - "bedrock:InvokeModel"
+            Effect: "Allow"
+          - Resource: !GetAtt KnowledgeBaseWithRDS.KnowledgeBaseArn
+            Action:
+            - "bedrock:Retrieve"
+            Effect: "Allow"
+        PolicyName: "nlq-policy-agent"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action: "sts:AssumeRole"
+          Effect: "Allow"
+          Principal:
+            Service: "bedrock.amazonaws.com"
+      
+  BedrockAgent:
+    Type: "AWS::Bedrock::Agent"
+    UpdateReplacePolicy: "Retain"
+    DeletionPolicy: "Delete"
+    Properties:
+      AgentName: "nlg-agent"
+      AgentResourceRoleArn: !GetAtt IAMRoleForAgent.Arn
+      AutoPrepare: true
+      Description: "Agent to query supported datasources using NLQ"
+      FoundationModel: !Ref LLM
+      IdleSessionTTLInSeconds: 600
+      Instruction: |
+                Role: You are a SQL developer creating queries for Amazon Athena.
+                Objective: Generate SQL queries to return data based on the provided schema and user request. Also, returns SQL query created.
+                1. Query Decomposition and Understanding:
+                   - Analyze the user’s request to understand the main objective.
+                   - Break down reqeusts into sub-queries that can each address a part of the user's request, using the schema provided.
+                2. SQL Query Creation:
+                   - For each sub-query, use the relevant tables and fields from the provided schema.
+                   - Construct SQL queries that are precise and tailored to retrieve the exact data required by the user’s request.
+                3. Query Execution and Response:
+                   - Execute the constructed SQL queries against the Amazon Athena database.
+                   - Return the results exactly as they are fetched from the database, ensuring data integrity and accuracy. Include the query generated and results in the response.
+      ActionGroups:
+        - ActionGroupName: "nlq-action-group-sql"
+          Description: "Query data in the connected datasources"
+          ActionGroupExecutor:
+            Lambda: "{{resolve:ssm:/nlq/lambda/arn}}"
+          ApiSchema:
+            Payload: |        
+                {
+                    "openapi": "3.0.1",
+                    "info": {
+                        "title": "Query API",
+                        "description": "API for querying data from supported datasources",
+                        "version": "1.0.0"
+                    },
+                    "paths": {
+                        "/query/rds": {
+                            "post": {
+                                "parameters": [{
+                                  "name": "datasource",
+                                  "in": "path",
+                                  "description": "Datasource to query",
+                                  "required": true,
+                                  "schema": {
+                                    "type": "string"
+                                  }
+                                }],
+                                "description": "Execute a query on a target database",
+                                "requestBody": {
+                                    "description": "Query details",
+                                    "required": true,
+                                    "content": {
+                                        "application/json": {
+                                            "schema": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "query": {
+                                                        "type": "string",
+                                                        "description": "SQL Query"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                "responses": {
+                                    "200": {
+                                        "description": "Successful response with query results",
+                                        "content": {
+                                            "application/json": {
+                                                "schema": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "ResultSet": {
+                                                            "type": "array",
+                                                            "items": {
+                                                                "type": "object",
+                                                                "description": "A single row of query results"
+                                                            },
+                                                            "description": "Results returned by the query"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "default": {
+                                        "description": "Error response",
+                                        "content": {
+                                            "application/json": {
+                                                "schema": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "message": {
+                                                            "type": "string"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+      KnowledgeBases:
+        - KnowledgeBaseId: !Ref KnowledgeBaseWithRDS
+          Description: "Knowledge Base with RDS metadata"
+          KnowledgeBaseState: "ENABLED"
+            
+  Permission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: "{{resolve:ssm:/nlq/lambda}}"
+      Action: lambda:InvokeFunction
+      Principal: "bedrock.amazonaws.com"
+      SourceArn: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/${BedrockAgent}"
