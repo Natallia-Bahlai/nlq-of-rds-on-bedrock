@@ -20,7 +20,7 @@ SELECT extversion FROM pg_extension WHERE extname='vector';
 ```
 3. Insert sample data about Netflix shows
 ```sh
-psql -d "postgres://username:pasword@clusterendpoint/netflix" -f netflix.sql
+psql -d "postgres://username:pasword@clusterendpoint/postgres" -f netflix.sql
 ```
 4. Upload file `netflix_ddl` to S3 bucket which can be found in the NlqMainStack CloudFormation output
 
