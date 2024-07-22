@@ -24,7 +24,7 @@ Parameters:
 
   NLQAppDatabaseName:
     Type: String
-    Default: "netflix"
+    Default: "postgres"
     Description: NLQ application database.
 
   RDSPort:
@@ -165,6 +165,7 @@ Resources:
     Type: "AWS::RDS::DBInstance"
     Properties:
       DBInstanceIdentifier: aurora-pg-instance
+      #DBName: !Ref NLQAppDatabaseName
       Engine: "aurora-postgresql"
       DBClusterIdentifier: !Ref RDSCluster
       PubliclyAccessible: true
@@ -362,7 +363,7 @@ Resources:
   SSMRDSClusterArn:
     Type: AWS::SSM::Parameter
     Properties:
-      Description: DO NOT UPDATE. Updated from CFN. RDSCluster.Arn.
+      Description: DO NOT UPDATE. Updated from CFN. RDSCluster.Arn
       Name: "/nlq/rdscluster/arn"
       Type: String
       Value: !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:${RDSCluster}"
@@ -370,10 +371,18 @@ Resources:
   SSMRDSSecretArn:
     Type: AWS::SSM::Parameter
     Properties:
-      Description: DO NOT UPDATE. Updated from CFN. RDSCluster.MasterUserSecret.SecretArn.
+      Description: DO NOT UPDATE. Updated from CFN. RDSCluster.MasterUserSecret.SecretArn
       Name: "/nlq/rdscluster/secret/arn"
       Type: String
       Value: !GetAtt RDSCluster.MasterUserSecret.SecretArn
+
+  SSMRDSDBName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: DO NOT UPDATE. Updated from CFN. RDSDBInstance.DBName
+      Name: "/nlq/rdsinstance/dbname"
+      Type: String
+      Value: !Ref NLQAppDatabaseName
 
   SSMS3Arn:
     Type: AWS::SSM::Parameter

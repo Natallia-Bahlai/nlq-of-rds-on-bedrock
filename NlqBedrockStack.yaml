@@ -68,7 +68,7 @@ Resources:
         RdsConfiguration:
           ResourceArn: "{{resolve:ssm:/nlq/rdscluster/arn}}"
           CredentialsSecretArn: "{{resolve:ssm:/nlq/rdscluster/secret/arn}}"
-          DatabaseName: "netflix" #!Ref NLQAppDatabaseName
+          DatabaseName: "{{resolve:ssm:/nlq/rdsinstance/dbname}}"
           TableName: "bedrock_integration.bedrock_kb"
           FieldMapping:
             VectorField: "embedding"
