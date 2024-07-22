@@ -1,4 +1,4 @@
-# Natural Language Queries of Relational Databases with Amazon Bedrock Agents
+# Natural Language Queries of Relational Databases with Amazon Bedrock Agents - Quick Start
 ## Key components
 ![Quick Start Solution Diagram](https://github.com/Natallia-Bahlai/nlq-of-rds-on-bedrock/blob/main/NLQ%20with%20RDS%20using%20Bedrock%20Agents.drawio.png?raw=true)
 
