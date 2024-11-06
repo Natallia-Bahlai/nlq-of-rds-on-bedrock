@@ -167,6 +167,7 @@ Resources:
                                   }
                                 }],
                                 "description": "Execute a query on a target database",
+                                "operationId": "op1",
                                 "requestBody": {
                                     "description": "Query details",
                                     "required": true,
