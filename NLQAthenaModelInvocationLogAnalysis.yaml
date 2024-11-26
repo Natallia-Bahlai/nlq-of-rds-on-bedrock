@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: "Natural Language Queries - Analysis of Amazon Bedrock Model Invocation Logs with Amazon Athena"
+        
+Resources:
+  S3Bucket:
+    UpdateReplacePolicy: "Retain"
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: "Delete"
+    Properties:
+      PublicAccessBlockConfiguration:
+        RestrictPublicBuckets: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        BlockPublicAcls: true
+      BucketName: !Sub "nlq-logs-${AWS::Region}-v2"
+      OwnershipControls:
+        Rules:
+        - ObjectOwnership: "BucketOwnerEnforced"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - BucketKeyEnabled: true
+          ServerSideEncryptionByDefault:
+            SSEAlgorithm: "AES256"
+            
+  DataCatalog:
+    UpdateReplacePolicy: "Retain"
+    Type: AWS::Glue::Database
+    DeletionPolicy: "Delete"
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Description: "Database for Model Invocation Logs"
+        Name: !Sub "nlq-logs-v2"
+        
+  Crawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: "nlq-logs-crawler-v2"
+      Role: 'arn:aws:iam::446847736498:role/service-role/AWSGlueServiceRole-Crawler'
+      DatabaseName: !Ref DataCatalog
+      Targets:
+        S3Targets:
+          - Path: !Sub "${S3Bucket}/AWSLogs/${AWS::AccountId}/BedrockModelInvocationLogs/"
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "LOG"
+      Schedule:
+        ScheduleExpression: "cron(10 * ? * MON-FRI *)"
+        
+  AthenaNamedQuery:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref DataCatalog
+      Description: "A query to analyze Model Invocation Logs"
+      Name: "nlq-sql-queries"
+      QueryString: >
+                    WITH resultsRanked as (
+                        SELECT partition_1,
+                            partition_2,
+                            partition_3,
+                            partition_4,
+                            modelId,
+                            input.inputBodyJson.messages [ 1 ].content [ 1 ].text nlQuery,
+                            input.inputTokenCount tokenCntIn,
+                            output.outputTokenCount tokenCntOut,
+                            cardinality(input.inputBodyJson.messages) msgCntIn,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY input.inputBodyJson.messages [ 1 ].content [ 1 ].text,
+                                partition_1,
+                                partition_2,
+                                partition_3,
+                                partition_4
+                                ORDER BY cardinality(input.inputBodyJson.messages) DESC
+                            ) AS rankNum,
+                            input.inputBodyJson.messages inMsgs,
+                            output.outputBodyJson.content outMsgs --,
+                            --input.inputBodyJson.messages || ARRAY[output.outputBodyJson.content] msgs
+                        FROM "AwsDataCatalog"."nlq-db-v1"."bedrockmodelinvocationlogs"
+                        where partition_3 in ('22', '26')
+                    ),
+                    resultsSummary as (
+                        SELECT partition_1,
+                            partition_2,
+                            partition_3,
+                            partition_4,
+                            modelId,
+                            nlQuery,
+                            SUM(tokenCntIn) tokenCntIn,
+                            SUM(tokenCntOut) tokenCntOut,
+                            SUM(tokenCntIn) * 0.000003 + SUM(tokenCntOut) * 0.000015 cost
+                        FROM resultsRanked
+                        WHERE rankNum = 1
+                        GROUP BY modelId,
+                            nlQuery,
+                            partition_1,
+                            partition_2,
+                            partition_3,
+                            partition_4
+                    ),
+                    resultsDetailed as (
+                        SELECT partition_1,
+                            partition_2,
+                            partition_3,
+                            partition_4,
+                            modelId,
+                            nlQuery,
+                            msg.role,
+                            --msg.content,
+                            REDUCE(
+                                msg.content,
+                                '',
+                                (acc, x)->CASE
+                                    WHEN x.type = 'text' THEN x.text
+                                    WHEN x.type = 'tool_use' and starts_with(x.name, 'post__nlq-action-group-sql') THEN concat(acc, chr(10) || '>_' || chr(10), x.input.query) 
+                                    --WHEN x.type = 'tool_use' and starts_with(x.name, 'GET__x_amz_knowledgebase') THEN concat(acc, chr(10) || chr(10), 'Schema search: ' || x.input.searchQuery)
+                                    WHEN x.type = 'tool_result' THEN x.content 
+                                    --ELSE concat(acc, chr(10) || chr(10), x.text) 
+                                END,
+                                acc->acc
+                            ) as msgChain
+                        FROM resultsRanked
+                            CROSS JOIN UNNEST(inMsgs) as t(msg)
+                        WHERE rankNum = 1
+                    )
+                    -- to review stats such as tokens, estimated cost for a given NL query
+                    SELECT partition_1 || partition_2 || partition_3 yyyymmdd,
+                        nlQuery, modelId, tokenCntIn, tokenCntOut, cost
+                    FROM resultsSummary
+                    WHERE nlQuery LIKE 'how many job titles%'
+
+                    /*
+                    -- to review agentic chain of thought for a given NL query
+                    SELECT partition_1 || partition_2 || partition_3 yyyymmdd,
+                        nlQuery, msgChain
+                    FROM resultsDetailed
+                    WHERE nlQuery LIKE 'how many job titles%'
+                    */
+      
