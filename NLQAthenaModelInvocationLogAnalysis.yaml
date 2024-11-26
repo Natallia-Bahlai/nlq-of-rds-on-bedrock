@@ -76,21 +76,30 @@ Resources:
                             output.outputBodyJson.content outMsgs --,
                             --input.inputBodyJson.messages || ARRAY[output.outputBodyJson.content] msgs
                         FROM "AwsDataCatalog"."nlq-db-v1"."bedrockmodelinvocationlogs"
-                        where partition_3 in ('22', '26')
+                        --where partition_3 in ('19', '22')
+                    ),
+                    pricing as (
+                        SELECT *
+                        FROM (
+                            VALUES 
+                            ROW('anthropic.claude-3-5-sonnet-20240620-v1:0', 0.000003, 0.000015),
+                            ROW('anthropic.claude-3-sonnet-20240229-v1:0', 0.000003, 0.000015),
+                            ROW('anthropic.claude-3-haiku-20240229-v1:0', 0.00000025, 0.00000125)
+                        ) AS users (modelId, priceIn, priceOut)
                     ),
                     resultsSummary as (
                         SELECT partition_1,
                             partition_2,
                             partition_3,
                             partition_4,
-                            modelId,
+                            r.modelId,
                             nlQuery,
                             SUM(tokenCntIn) tokenCntIn,
                             SUM(tokenCntOut) tokenCntOut,
-                            SUM(tokenCntIn) * 0.000003 + SUM(tokenCntOut) * 0.000015 cost
-                        FROM resultsRanked
-                        WHERE rankNum = 1
-                        GROUP BY modelId,
+                            SUM(tokenCntIn * priceIn) + SUM(tokenCntOut * priceOut) cost
+                        FROM resultsRanked r
+                            INNER JOIN pricing p on r.modelId = p.modelId
+                        GROUP BY r.modelId,
                             nlQuery,
                             partition_1,
                             partition_2,
@@ -123,10 +132,10 @@ Resources:
                         WHERE rankNum = 1
                     )
                     -- to review stats such as tokens, estimated cost for a given NL query
-                    SELECT partition_1 || partition_2 || partition_3 yyyymmdd,
+                    SELECT partition_1 || partition_2 || partition_3 || '-' || partition_4 as "yyyymmdd-hh",
                         nlQuery, modelId, tokenCntIn, tokenCntOut, cost
                     FROM resultsSummary
-                    WHERE nlQuery LIKE 'how many job titles%'
+                    --WHERE nlQuery LIKE 'how many job titles%'
 
                     /*
                     -- to review agentic chain of thought for a given NL query
