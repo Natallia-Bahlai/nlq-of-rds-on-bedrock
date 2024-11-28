@@ -12,7 +12,7 @@ Resources:
         IgnorePublicAcls: true
         BlockPublicPolicy: true
         BlockPublicAcls: true
-      BucketName: !Sub "nlq-logs-${AWS::Region}-v2"
+      BucketName: !Sub "nlq-logs-${AWS::Region}"
       OwnershipControls:
         Rules:
         - ObjectOwnership: "BucketOwnerEnforced"
@@ -30,13 +30,65 @@ Resources:
       CatalogId: !Ref AWS::AccountId
       DatabaseInput:
         Description: "Database for Model Invocation Logs"
-        Name: !Sub "nlq-logs-v2"
+        Name: !Sub "nlq-logs"
+            
+  IAMRole:
+    Type: "AWS::IAM::Role"
+    UpdateReplacePolicy: "Retain"
+    DeletionPolicy: "Delete"
+    Properties:
+      Path: "/service-role/"
+      MaxSessionDuration: 3600
+      RoleName: "nlq-crawler-role"
+      Policies:
+      - PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Resource: "*"
+            Action:
+            - "glue:*"
+            - "s3:GetBucketLocation"
+            - "s3:ListBucket"
+            - "s3:ListAllMyBuckets"
+            - "s3:GetBucketAcl"
+            - "ec2:DescribeVpcEndpoints"
+            - "ec2:DescribeRouteTables"
+            - "ec2:CreateNetworkInterface"
+            - "ec2:DeleteNetworkInterface"
+            - "ec2:DescribeNetworkInterfaces"
+            - "ec2:DescribeSecurityGroups"
+            - "ec2:DescribeSubnets"
+            - "ec2:DescribeVpcAttribute"
+            - "iam:ListRolePolicies"
+            - "iam:GetRole"
+            - "iam:GetRolePolicy"
+            - "cloudwatch:PutMetricData"
+            Effect: "Allow"
+          - Resource: !Sub "arn:aws:s3:::${S3Bucket}/AWSLogs/${AWS::AccountId}/BedrockModelInvocationLogs*"
+            Action:
+            - "s3:GetObject"
+            - "s3:PutObject"
+            Effect: "Allow"
+          - Resource: "arn:aws:logs:*:*:*:/aws-glue/*"
+            Action:
+            - "logs:CreateLogGroup"
+            - "logs:CreateLogStream"
+            - "logs:PutLogEvents"
+            Effect: "Allow"
+        PolicyName: "nlq-policy-agent"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action: "sts:AssumeRole"
+          Effect: "Allow"
+          Principal:
+            Service: "glue.amazonaws.com"
         
   Crawler:
     Type: AWS::Glue::Crawler
     Properties:
-      Name: "nlq-logs-crawler-v2"
-      Role: 'arn:aws:iam::446847736498:role/service-role/AWSGlueServiceRole-Crawler'
+      Name: "nlq-cwatch-crawler"
+      Role: !GetAtt IAMRole.Arn
       DatabaseName: !Ref DataCatalog
       Targets:
         S3Targets:
@@ -74,10 +126,11 @@ Resources:
                                 ORDER BY cardinality(input.inputBodyJson.messages) DESC
                             ) AS rankNum,
                             input.inputBodyJson.messages inMsgs,
-                            output.outputBodyJson.content outMsgs --,
-                            --input.inputBodyJson.messages || ARRAY[output.outputBodyJson.content] msgs
-                        FROM "AwsDataCatalog"."nlq-db-v1"."bedrockmodelinvocationlogs"
-                        where partition_3 in ('19', '22')
+                            output.outputBodyJson.content outMsgs,
+                            timestamp
+                    --	ARRAY[	input.inputBodyJson.messages ] || ARRAY[ output.outputBodyJson] as msgs
+                        FROM "AwsDataCatalog"."nlq-logs"."bedrockmodelinvocationlogs"
+                    --	where partition_3 in ('19', '22')
                     ),
                     pricing as (
                         SELECT *
@@ -97,9 +150,10 @@ Resources:
                             nlQuery,
                             SUM(tokenCntIn) tokenCntIn,
                             SUM(tokenCntOut) tokenCntOut,
-                            SUM(tokenCntIn * priceIn) + SUM(tokenCntOut * priceOut) cost
+                            CAST(SUM(tokenCntIn * priceIn) + SUM(tokenCntOut * priceOut) as decimal(10,4)) cost,
+                            MAX(timestamp) as timestamp
                         FROM resultsRanked r
-                            INNER JOIN pricing p on r.modelId = p.modelId and r.region = p.region
+                            LEFT JOIN pricing p on r.modelId = p.modelId and r.region = p.region
                         GROUP BY r.modelId,
                             nlQuery,
                             partition_1,
@@ -138,12 +192,13 @@ Resources:
                         nlQuery, modelId, tokenCntIn, tokenCntOut, cost
                     FROM resultsSummary
                     --WHERE nlQuery LIKE 'how many job titles%'
+                    ORDER BY timestamp desc
                     --*/
                     /*
                     -- to review agentic chain of thought for a given NL query
-                    SELECT partition_1 || partition_2 || partition_3 yyyymmdd,
-                        nlQuery, msgChain
+                    SELECT partition_1 || partition_2 || partition_3 || '-' || partition_4 as "yyyymmdd-hh",
+                        nlQuery, role, msgChain
                     FROM resultsDetailed
-                    WHERE nlQuery LIKE 'how many employee%'
+                    WHERE nlQuery LIKE 'count employees, departments, job titles and execute each query one by one and then combine all response%'
                     */
       
