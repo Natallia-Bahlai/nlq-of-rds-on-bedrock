@@ -106,7 +106,18 @@ Resources:
       Description: "A query to analyze Model Invocation Logs"
       Name: "nlq-sql-1st-query-summary"
       QueryString: >
-                    WITH resultsRanked as (
+                    WITH pricing as (
+                        SELECT *
+                        FROM (
+                            VALUES 
+                            ROW('anthropic.claude-3-5-sonnet-20241022-v2:0', 0.000003, 0.000015, 'us-west-2'),
+                            ROW('anthropic.claude-3-5-sonnet-20240620-v1:0', 0.000003, 0.000015, 'us-west-2'),
+                            ROW('anthropic.claude-3-sonnet-20240229-v1:0', 0.000003, 0.000015, 'us-west-2'),
+                            ROW('anthropic.claude-3-haiku-20240307-v1:0', 0.00000025, 0.00000125, 'us-west-2'),
+                            ROW('anthropic.claude-3-sonnet-20240229-v1:0', 0.000003, 0.000015, 'ap-southeast-2'),
+                            ROW('anthropic.claude-3-haiku-20240307-v1:0', 0.00000025, 0.00000125, 'ap-southeast-2')
+                        ) AS users (modelId, priceIn, priceOut, region)
+                    ), resultsRanked as (
                         SELECT partition_1,
                             partition_2,
                             partition_3,
@@ -129,16 +140,6 @@ Resources:
                             output.outputBodyJson.content outMsgs,
                             timestamp
                         FROM "AwsDataCatalog"."nlq-logs"."bedrockmodelinvocationlogs"
-                    ), pricing as (
-                        SELECT *
-                        FROM (
-                            VALUES 
-                            ROW('anthropic.claude-3-5-sonnet-20240620-v1:0', 0.000003, 0.000015, 'us-west-2'),
-                            ROW('anthropic.claude-3-sonnet-20240229-v1:0', 0.000003, 0.000015, 'us-west-2'),
-                            ROW('anthropic.claude-3-haiku-20240307-v1:0', 0.00000025, 0.00000125, 'us-west-2'),
-                            ROW('anthropic.claude-3-sonnet-20240229-v1:0', 0.000003, 0.000015, 'ap-southeast-2'),
-                            ROW('anthropic.claude-3-haiku-20240307-v1:0', 0.00000025, 0.00000125, 'ap-southeast-2')
-                        ) AS users (modelId, priceIn, priceOut, region)
                     ), resultsSummary as (
                         SELECT partition_1,
                             partition_2,
@@ -164,10 +165,9 @@ Resources:
                         nlQuery, modelId, tokenCntIn, tokenCntOut, cost, stepsCnt
                     FROM resultsSummary
                     ORDER BY timestamp desc
-                    LIMIT 10
-                    --WHERE nlQuery in ('show me top 5 departments with average number of employees') 
+                    LIMIT 100
+                    --WHERE nlQuery LIKE '%top 4 departments have the highest salary%'
                     -- to review stats such as input and output tokens, estimated cost for a given NL query
-
 
 
   AthenaNamedQuery2nd:
@@ -189,7 +189,8 @@ Resources:
                             output.outputTokenCount tokenCntOut,
                             cardinality(input.inputBodyJson.messages) msgCntIn,
                             ROW_NUMBER() OVER (
-                                PARTITION BY input.inputBodyJson.messages [ 1 ].content [ 1 ].text,
+                                PARTITION BY modelId,
+                                input.inputBodyJson.messages [ 1 ].content [ 1 ].text,
                                 partition_1,
                                 partition_2,
                                 partition_3,
@@ -197,38 +198,9 @@ Resources:
                                 ORDER BY cardinality(input.inputBodyJson.messages) DESC
                             ) AS rankNum,
                             input.inputBodyJson.messages inMsgs,
-                            output.outputBodyJson.content outMsgs,
+                            output.outputBodyJson outMsgs,
                             timestamp
                         FROM "AwsDataCatalog"."nlq-logs"."bedrockmodelinvocationlogs"
-                    ), pricing as (
-                        SELECT *
-                        FROM (
-                            VALUES 
-                            ROW('anthropic.claude-3-5-sonnet-20240620-v1:0', 0.000003, 0.000015, 'us-west-2'),
-                            ROW('anthropic.claude-3-sonnet-20240229-v1:0', 0.000003, 0.000015, 'us-west-2'),
-                            ROW('anthropic.claude-3-haiku-20240307-v1:0', 0.00000025, 0.00000125, 'us-west-2'),
-                            ROW('anthropic.claude-3-sonnet-20240229-v1:0', 0.000003, 0.000015, 'ap-southeast-2'),
-                            ROW('anthropic.claude-3-haiku-20240307-v1:0', 0.00000025, 0.00000125, 'ap-southeast-2')
-                        ) AS users (modelId, priceIn, priceOut, region)
-                    ), resultsSummary as (
-                        SELECT partition_1,
-                            partition_2,
-                            partition_3,
-                            partition_4,
-                            r.modelId,
-                            nlQuery,
-                            SUM(tokenCntIn) tokenCntIn,
-                            SUM(tokenCntOut) tokenCntOut,
-                            CAST(SUM(tokenCntIn * priceIn) + SUM(tokenCntOut * priceOut) as decimal(10,4)) cost,
-                            MAX(timestamp) as timestamp
-                        FROM resultsRanked r
-                            LEFT JOIN pricing p on r.modelId = p.modelId and r.region = p.region
-                        GROUP BY r.modelId,
-                            nlQuery,
-                            partition_1,
-                            partition_2,
-                            partition_3,
-                            partition_4
                     ), resultsDetailed as (
                         SELECT partition_1,
                             partition_2,
@@ -236,27 +208,33 @@ Resources:
                             partition_4,
                             modelId,
                             nlQuery,
-                            msg.role,
-                            --msg.content,
+                            msg.role role,
+                            --msg.content msgContent, inMsgs,
                             REDUCE(
                                 msg.content,
                                 '',
                                 (acc, x)->CASE
                                     WHEN x.type = 'text' THEN x.text
-                                    --WHEN x.type = 'tool_use' and starts_with(x.name, 'post__') THEN concat(acc, chr(10) || '>_' || chr(10), x.input.query) 
+                                    --WHEN x.type = 'tool_use' and starts_with(x.name, 'post__nlq-action-group-sql') THEN concat(acc, chr(10) || '>_' || chr(10), x.input.query) 
                                     --WHEN x.type = 'tool_use' and starts_with(x.name, 'GET__x_amz_knowledgebase') THEN concat(acc, chr(10) || chr(10), 'Schema search: ' || x.input.searchQuery)
                                     --WHEN x.type = 'tool_result' THEN x.content 
-                                    --ELSE concat(acc, chr(10) || chr(10), x.text) 
+                                    --ELSE concat(acc, chr(10), x.text) 
                                 END,
                                 acc->acc
-                            ) as msgChain, step
+                            ) as msgChain, step, timestamp
                         FROM resultsRanked
                             CROSS JOIN UNNEST(inMsgs) WITH ORDINALITY as t(msg, step)
                         WHERE rankNum = 1
-                    ) 
-                    SELECT partition_1 || partition_2 || partition_3 || '-' || partition_4 as "yyyymmdd-hh",
+                    ), resultsCombined as (
+                        SELECT partition_1, partition_2, partition_3, partition_4, modelId, nlQuery, timestamp, role, msgChain as msgChain, step FROM resultsDetailed
+                        UNION all
+                        SELECT partition_1, partition_2, partition_3, partition_4, modelId, nlQuery, timestamp, outMsgs.role, outMsgs.content[1].text as msgChain, (msgCntIn + 1) as step FROM resultsRanked WHERE rankNum = 1
+                    )
+                    SELECT partition_1 || partition_2 || partition_3 || '-' || partition_4 as "yyyymmdd-hh", modelid, 
                         nlQuery, step, role, msgChain
-                    FROM resultsDetailed 
-                    LIMIT 10
-                    --WHERE nlQuery LIKE 'show me top 5 departments with average number of employees%' 
+                    FROM resultsCombined  
+                    ORDER by timestamp desc, step asc
+                    LIMIT 100 
+                    --WHERE nlQuery LIKE '%top 3 departments have the highest salary'
                     -- to review agentic chain of thought for a given NL query
+                    
