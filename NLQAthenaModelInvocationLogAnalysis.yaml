@@ -127,7 +127,7 @@ Resources:
                             input.inputBodyJson.messages [ 1 ].content [ 1 ].text nlQuery,
                             input.inputTokenCount tokenCntIn,
                             output.outputTokenCount tokenCntOut,
-                            cardinality(input.inputBodyJson.messages) stepsCnt,
+                            cardinality(input.inputBodyJson.messages) + IF(output.outputBodyJson IS NULL, 0,1) stepsCnt,
                             ROW_NUMBER() OVER (
                                 PARTITION BY input.inputBodyJson.messages [ 1 ].content [ 1 ].text,
                                 partition_1,
@@ -166,7 +166,7 @@ Resources:
                     FROM resultsSummary
                     ORDER BY timestamp desc
                     LIMIT 100
-                    --WHERE nlQuery LIKE '%top 4 departments have the highest salary%'
+                    --WHERE nlQuery LIKE 'what top 4 departments have the highest salary%'
                     -- to review stats such as input and output tokens, estimated cost for a given NL query
 
 
@@ -235,6 +235,79 @@ Resources:
                     FROM resultsCombined  
                     ORDER by timestamp desc, step asc
                     LIMIT 100 
-                    --WHERE nlQuery LIKE '%top 3 departments have the highest salary'
+                    --WHERE nlQuery LIKE 'what top 3 departments have the highest salary'
                     -- to review agentic chain of thought for a given NL query
                     
+  AthenaNamedQuery2nd:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref DataCatalog
+      Description: "A query to analyze Model Invocation Logs"
+      Name: "nlq-sql-3rd-query-pivoted"
+      QueryString: >
+                    WITH resultsRanked as (
+                        SELECT partition_1,
+                            partition_2,
+                            partition_3,
+                            partition_4,
+                            modelId,
+                            region,
+                            input.inputBodyJson.messages [ 1 ].content [ 1 ].text nlQuery,
+                            input.inputTokenCount tokenCntIn,
+                            output.outputTokenCount tokenCntOut,
+                            cardinality(input.inputBodyJson.messages) msgCntIn,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY modelId,
+                                input.inputBodyJson.messages [ 1 ].content [ 1 ].text,
+                                partition_1,
+                                partition_2,
+                                partition_3,
+                                partition_4
+                                ORDER BY cardinality(input.inputBodyJson.messages) DESC
+                            ) AS rankNum,
+                            input.inputBodyJson.messages inMsgs,
+                            output.outputBodyJson outMsgs,
+                            timestamp
+                        FROM "AwsDataCatalog"."nlq-logs"."bedrockmodelinvocationlogs"
+                    ),
+                    resultsTransient as (
+                        SELECT partition_1, partition_2, partition_3, partition_4, nlQuery, step,
+                            multimap_agg(
+                                modelid,
+                                reduce(
+                                    msg.content,
+                                    '',
+                                    (s, x)->CASE
+                                        WHEN x.type = 'text' THEN x.text
+                                        WHEN x.type = 'tool_use' AND starts_with(x.name, 'post__nlq-action-group-sql') THEN concat(s, chr(10) || '>_' || chr(10), x.input.query)
+                                        WHEN x.type = 'tool_result' THEN x.content 
+                                    END,
+                                    s->s
+                                )
+                            ) byModel
+                        FROM (
+                                SELECT partition_1, partition_2, partition_3, partition_4, modelid,
+                                    nlQuery,
+                                    step,
+                                    msg
+                                FROM resultsRanked
+                                    CROSS JOIN UNNEST(inMsgs) WITH ORDINALITY as t(msg, step)
+                                WHERE rankNum = 1
+                            )
+                        GROUP BY partition_1, partition_2, partition_3, partition_4, nlQuery, step
+                        UNION all
+                        SELECT partition_1, partition_2, partition_3, partition_4, nlQuery, MAX(msgCntIn + 1) as step, multimap_agg(modelId, IF(cardinality(outMsgs.content)=0, '', outMsgs.content[1].text)) as byModel FROM resultsRanked WHERE rankNum = 1 GROUP BY partition_1, partition_2, partition_3, partition_4, nlQuery
+                    ),
+                    resultsPivoted as (
+                        SELECT --partition_1, partition_2, partition_3, partition_4, 
+                            step,
+                            byModel [ 'anthropic.claude-3-5-sonnet-20241022-v2:0' ] [ 1 ] as "claude-3-5-sonnet-v2",
+                            byModel [ 'anthropic.claude-3-5-sonnet-20240620-v1:0' ] [ 1 ] as "claude-3-5-sonnet-v1",
+                            byModel [ 'anthropic.claude-3-sonnet-20240229-v1:0' ] [ 1 ] as "claude-3-sonnet-v1",
+                            byModel [ 'anthropic.claude-3-5-haiku-20241022-v1:0' ] [ 1 ] as "claude-3-5-haiku-v1",
+                            byModel [ 'anthropic.claude-3-haiku-20240307-v1:0' ] [ 1 ] as "claude-3-haiku"
+                        FROM resultsTransient
+                        ORDER BY step
+                    )
+                    SELECT *
+                    FROM resultsPivoted
